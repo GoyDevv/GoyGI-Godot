@@ -1,0 +1,106 @@
+name: Release
+
+# Pushing a tag (v3.1.0) builds the installable zip and publishes the release,
+# with the notes taken out of CHANGELOG.md. The version in
+# addons/goygi/plugin.cfg has to match the tag, so a release can never be built
+# from a tree that calls itself something else.
+#
+#   git tag v3.1.0 && git push origin v3.1.0
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, e.g. v3.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Package and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the tag against plugin.cfg
+        id: meta
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          version="$(sed -n 's/^version="\([^"]*\)"$/\1/p' addons/goygi/plugin.cfg)"
+          if [ -z "$version" ]; then
+            echo "::error::no version= line in addons/goygi/plugin.cfg"; exit 1
+          fi
+          if [ "v$version" != "$tag" ]; then
+            echo "::error::tag $tag does not match the plugin version $version"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Package the addon
+        run: |
+          set -euo pipefail
+          name="goygi-${{ steps.meta.outputs.version }}"
+          mkdir -p "dist/$name/addons"
+          cp -r addons/goygi "dist/$name/addons/goygi"
+          cp README.md CONTRIBUTING.md CHANGELOG.md LICENSE "dist/$name/"
+          (cd dist && zip -qr "$name.zip" "$name")
+          unzip -l "dist/$name.zip" | tail -5
+          echo "name=$name" >> "$GITHUB_ENV"
+
+      - name: Write the release notes
+        run: |
+          set -euo pipefail
+          version="${{ steps.meta.outputs.version }}"
+          {
+            echo "Real-time global illumination for the Godot **Mobile** renderer:"
+            echo "bounce light, sky light and colour bleeding, live in the editor and"
+            echo "at runtime. No SDFGI, no VoxelGI, no lightmap baking."
+            echo
+            echo "**Install:** unzip into your project so the addon ends up at"
+            echo "\`addons/goygi/\`, then enable **GoyGI** in"
+            echo "\`Project > Project Settings > Plugins\` and press Play."
+            echo "Requires Godot 4.7+ (built and rendered on **4.7.2**)."
+            echo
+            echo "---"
+            echo
+          } > notes.md
+          awk -v v="$version" '
+            /^## \[/ {
+              if (index($0, "[" v "]") > 0) { printing = 1; next }
+              if (printing) exit
+            }
+            printing && /^\[[0-9]/ { exit }
+            printing { print }
+          ' CHANGELOG.md >> notes.md
+          if grep -q '^### ' notes.md; then :; else
+            echo "::error::CHANGELOG.md has no section for $version"; exit 1
+          fi
+          {
+            echo
+            echo "---"
+            echo
+            echo "Full notes: [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ steps.meta.outputs.tag }}/CHANGELOG.md) · "
+            echo "CI for this tag: [Actions](https://github.com/${{ github.repository }}/actions)"
+          } >> notes.md
+          cat notes.md
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.meta.outputs.tag }}" \
+            "dist/${name}.zip" \
+            --title "GoyGI ${{ steps.meta.outputs.version }}" \
+            --notes-file notes.md \
+            --latest

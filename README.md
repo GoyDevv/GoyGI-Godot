@@ -4,58 +4,69 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Godot 4.7](https://img.shields.io/badge/Godot-4.7.2-478cbf.svg)
 ![Renderer: Mobile](https://img.shields.io/badge/renderer-Mobile%20%2F%20Vulkan-7fd4ff.svg)
+[![Release](https://img.shields.io/github/v/release/GoyDevv/GoyGI-Godot?label=download&sort=semver)](https://github.com/GoyDevv/GoyGI-Godot/releases/latest)
 
-**Real-time global illumination for the Godot **Mobile** renderer. No SDFGI, no VoxelGI, no lightmap baking, no phone-specific build — bounce light, sky light and colour bleeding, live in the editor and at runtime on a Vulkan 1.1 phone.**
+**Real-time global illumination for the Godot Mobile renderer.** Bounce light, sky light and colour bleeding — live in the editor and at runtime on a Vulkan 1.1 phone. No SDFGI, no VoxelGI, no lightmap baking, no engine build.
 
 <p align="center">
   <img src=".github/banner.svg" alt="GoyGI" width="720">
 </p>
 
+> SDFGI and VoxelGI are **Forward+ only**. On `Mobile` (and on `Compatibility`) Godot gives you direct light, a sky, an ambient term and reflection probes — and nothing that moves light from a lamp to the wall next to it. GoyGI is that missing piece, as a plugin: an irradiance volume plus a world-space light cache, both computed in Vulkan compute shaders, both real-time.
+
 ## What it looks like
 
-All of the images below are rendered **by CI** on the Mobile renderer (software Vulkan, no GPU) every push — not by hand, not on a phone. `docs/screenshots/summary.txt` is the report they came with.
+### On a real Android phone
+
+<p align="center">
+  <img src="docs/screenshots/on_device_1.jpg" width="880" alt="GoyGI running on an Android phone"><br>
+  <img src="docs/screenshots/on_device_2.jpg" width="880" alt="GoyGI running on an Android phone"><br>
+  <sub>Straight off a phone, <code>--rendering-method mobile</code>: no SDFGI, no VoxelGI, no baked lightmap, no engine build.
+  Everything soft between those surfaces is the GI, computed at run time.</sub>
+</p>
+
+### Rendered by CI on every push
+
+The images below are produced by the CI job — a real render on the **Mobile** renderer over software Vulkan, with no GPU and no phone — and they are the same frames the checks were measured on. `docs/screenshots/summary.txt` is the report they came with.
 
 | indirect light only (`debug_view = GI Only`) | bounce through a doorway into the second room |
 |---|---|
 | ![GI only](docs/screenshots/gi_only.png) | ![second room](docs/screenshots/second_room.png) |
 | **wall close-up** (the old "pure boxes" case) | **GI switched off** — still plain-Godot lit |
 | ![wall close-up](docs/screenshots/wall_closeup.png) | ![GI off](docs/screenshots/gi_off.png) |
-| **beauty shot** | **voxel debug view** |
+| **beauty shot** | **voxel + chunk debug views** |
 | ![beauty](docs/screenshots/beauty.png) | ![voxels](docs/screenshots/voxels.png) |
-
-`SDFGI` and `VoxelGI` are **Forward+ only**. On `Mobile` (and on `Compatibility`) Godot gives you direct light, a sky, an ambient term and reflection probes — and nothing that moves light from a lamp to the wall next to it. GoyGI adds that missing piece as a plugin: an irradiance volume plus a world-space light cache, both computed in Vulkan compute shaders, both real-time.
 
 | | |
 |---|---|
-| **Renderer** | Vulkan 1.1 / `--rendering-method mobile` (`Forward+` also works, `Compatibility` runs with the GI switched off) |
+| **Renderer** | Vulkan 1.1, `--rendering-method mobile`. `Forward+` works too; `Compatibility` runs with the GI switched off |
 | **Cost** | 3 texture fetches per pixel for the indirect light, 1–2 occupancy taps for leak protection; the GI itself runs at 5–60 Hz in the background |
 | **Baking** | none. Sky, sun, lamps, torches and moving objects are all evaluated at run time |
 | **Editor** | live preview in the 3D viewport (toolbar button `GoyGI`) |
-| **Godot** | 4.7+ (CI builds and renders on **4.7.2**) |
-
-```
-GoyGI - Godot  ·  "An godot plugin for android mobile renderer, no need for SDFGI anymore, Use GoyGI"
-```
+| **Engine** | Godot 4.7+ (CI builds and renders on **4.7.2**) |
 
 ---
 
-## Fixed in 3.1
+## Why this exists
 
-Everything below was found by reading the maths, not by tuning knobs, and every one of them has a check in the CI test so it cannot come back.
+The Mobile renderer targets Android and iOS hardware. It has no SDFGI (no cascaded voxel clipmaps, no GPU work graph), no VoxelGI (no 3D texture probe baker, no GI probe instance shader), no lightmaps on anything you cannot pre-bake, and no way to host a compute-shader GI system from a script. What it *does* have is Vulkan 1.1, and that is enough to run one from a plugin.
 
-* **Voxels showed up as hard blocks on walls.** The sampler used to *move the sample point* towards the visible voxels: that offset is a discontinuous function of the surface position, so the hardware trilinear blend flipped between two voxel neighbourhoods at every cell boundary. Replaced with plain trilinear + a continuous occupancy leak guard — see [§11](#11-why-the-voxel-grid-used-to-show-up-as-boxes). Same fix removed the remaining light leaks around corners.
-* **"Missing chunks" / areas of the map going dark.** The per-chunk fade-in target was `passes / 3`, so a chunk that was recomputed (lamp switched, sun moved, geometry edited) dimmed to a third — or, when its pass counter was reset, to black. The fade now only goes up: a chunk that has been computed once keeps its light while it is blended to the new one.
-* **A map that grew after a rebuild silently lost its chunk cache.** `_setup_cache()` could change the chunk grid without reallocating the textures, after which the shader sampled a grid that no longer matched the texture. The cache is now reallocated whenever the grid key changes.
-* **Editing the level in the editor showed raw, unconverged voxels.** `rebuild()` did a full `stop()` + `start()` — throwing away the near volume *and* the whole world cache — for every moved prop. It now rebuilds **in place** when the occupancy grid keeps its size: occupancy, albedo and roof are re-uploaded into the live textures and the lighting is refreshed progressively.
-* **Switching the GI off made the scene look worse than plain Godot.** The GoyGI materials disable Godot's ambient light while the GI is on (so the sky is not counted twice), and with the GI off nothing gave it back — everything collapsed to direct light. The Environment's ambient light (colour, sky contribution and energy) is now fed through the ambient fallback whenever the GI is off.
-* **Mobile cost.** The sampling path went from an 8-iteration loop with 4–8 occupancy taps per pixel (≈40 texture fetches) to 3 trilinear fetches + 1–2 occupancy taps + 1 roof tap. The Low and Medium presets now also turn on `fast_triplanar` and off `normal_maps`, because on a phone the level shader is usually the expensive part, not the GI.
-* **Two scripts did not even parse** on current Godot (`var srgb := …get_format() != …` type inference, and a 4-argument `RenderingDevice.texture_update`). Found by the CI import step.
-* **Stale `.glsl.import` files could disable the GI silently.** The committed import metadata pointed at a SPIR-V build from an older engine, so the editor considered the compute shaders "already imported", never built them, and `GIManager` quietly fell back to direct light. CI now imports the shaders from scratch on every run and fails if any of the four is missing — see [Troubleshooting](#troubleshooting). Every failure path that used to disable the GI in silence now logs an explicit `ERROR: GIManager: ...`.
+GoyGI watches what the visible surfaces actually need and computes exactly that, at the resolution the phone can afford: a small camera-following irradiance volume for the room you are in, and a coarse world cache for everything else.
 
----
+## What you get
 
-## Table of contents
+- **Bounce light** from any number of lamps, omni, spot, and the sun or moon, through doorways and windows, for a fixed cost.
+- **Sky light** through openings, so interiors get their blue-green tint from the actual sky colours (procedural, physical, panorama or custom sky shaders are all read).
+- **Colour bleeding** from the albedo of what the light hit — a red wall makes the floor next to it red.
+- **Multi-bounce**, so a lit room lights the hallway next to it.
+- **Dynamic lights** (torch, muzzle flash, moving lamps) via CPU-traced virtual point lights, responding in the same frame.
+- **Editor preview**: press the `GoyGI` button in the 3D viewport toolbar and the GI runs on the scene you are editing.
+- **Zero setup**: an autoload attaches GoyGI to any 3D scene at runtime, finds the map, the sun and the WorldEnvironment, gives every Spot/Omni light an emitter, and puts StandardMaterial3D surfaces on the GoyGI Standard shader.
+- **Debug views** for the volume, the chunk cache, the light age and the leak guard.
 
+## Contents
+
+- [What it looks like](#what-it-looks-like)
 - [Why this exists](#why-this-exists)
 - [What you get](#what-you-get)
 - [Install](#install)
@@ -74,8 +85,6 @@ Everything below was found by reading the maths, not by tuning knobs, and every 
   - [10. Temporal accumulation](#10-temporal-accumulation)
   - [11. Why the voxel grid used to show up as boxes](#11-why-the-voxel-grid-used-to-show-up-as-boxes)
   - [12. The mobile budget](#12-the-mobile-budget)
-- [What it looks like](#what-it-looks-like)
-- [Fixed in 3.1](#fixed-in-31)
 - [Settings and quality](#settings-and-quality)
 - [Debug views](#debug-views)
 - [Performance on phones](#performance-on-phones)
@@ -83,34 +92,28 @@ Everything below was found by reading the maths, not by tuning knobs, and every 
 - [Known limitations](#known-limitations)
 - [Tests and CI](#tests-and-ci)
 - [Contributing](#contributing)
+- [Changelog](#changelog)
 - [License](#license)
-
----
-
-## Why this exists
-
-The Mobile renderer targets Android/IOS hardware. It has no SDFGI (no cascaded voxel clipmaps, no GPU work graph), no VoxelGI (no 3D texture probe baker, no GI probe instance shader), no lightmaps on anything you cannot pre-bake, and no `shader_globals`-free compute path. What it *does* have is Vulkan 1.1, and that is enough to run a compute-shader global illumination system from a plugin.
-
-GoyGI watches what the visible surfaces need and computes exactly that, at the resolution the phone can afford: a small camera-following irradiance volume for the room you are in, and a coarse world cache for everything else.
-
-## What you get
-
-- **Bounce light** from any number of lamps, omni, spot, and the sun/moon, through doorways and windows, for a fixed cost.
-- **Sky light** through openings, so interiors get their blue-green tint from the actual sky colours (procedural, physical, panorama or custom sky shaders are all read).
-- **Colour bleeding** from the albedo of what the light hit (red wall → reddish floor).
-- **Multi-bounce**, so a lit room lights the hallway next to it.
-- **Dynamic lights** (torch, muzzle flash, moving lamps) via CPU-traced virtual point lights, responding in the same frame.
-- **Editor preview**: press the `GoyGI` button in the 3D viewport toolbar and the GI runs on the scene you are editing.
-- **Zero setup**: an autoload attaches GoyGI to any 3D scene at runtime, finds the map / the sun / the world environment, gives every Spot/Omni light an emitter and puts StandardMaterial3D surfaces on the GoyGI Standard shader.
-- **Debug views** for the volume, the chunk cache, the light age and the leak guard.
 
 ## Install
 
-1. Copy `addons/goygi/` into your project as `addons/goygi/` (the plugin's paths are absolute: `res://addons/goygi/...`).
-2. `Project > Project Settings > Plugins` → enable **GoyGI**.
-3. Press Play. Done.
+**From the release zip** — [download the latest release](https://github.com/GoyDevv/GoyGI-Godot/releases/latest), unzip it and drop the `addons/` folder into your project. You should end up with `addons/goygi/`.
 
-The plugin registers the GoyGI global shader uniforms, the `goygi/*` Project Settings and the `GoyGIRuntime` autoload. In a scene with no GIManager the runtime autoload adds one, gives your lights GI emitters and converts your StandardMaterial3D surfaces to the GoyGI Standard shader. To control things yourself, add a `GIManager` node and turn its `auto_setup` off.
+**Or from a clone:**
+
+```bash
+git clone https://github.com/GoyDevv/GoyGI-Godot
+cp -r GoyGI-Godot/addons/goygi your-project/addons/goygi
+```
+
+Then:
+
+1. `Project > Project Settings > Plugins` → enable **GoyGI**.
+2. Press Play. Done.
+
+The plugin registers the GoyGI global shader uniforms, the `goygi/*` Project Settings and the `GoyGIRuntime` autoload. In a scene with no `GIManager` the runtime autoload adds one, gives your lights GI emitters and converts your `StandardMaterial3D` surfaces to the GoyGI Standard shader. To control things yourself, add a `GIManager` node and turn its `auto_setup` off.
+
+The paths inside the plugin are absolute (`res://addons/goygi/...`), so the folder has to keep that name and that location.
 
 > **Android export**: nothing extra. Mobile renderer + Vulkan. If the device has no `RenderingDevice` the GI switches itself off and the game keeps running on direct light only.
 
@@ -266,6 +269,7 @@ att = (1 − (r/R)⁴)² · r^(−decay) · spot(θ)
 spot(θ) = max(1 − ((1 − cosθ)/(1 − cosθ_max))^attenuation, 0)
 occlusion = !march(x → light, tol, r − 0.3)
 ```
+
 accumulated with the identical `0.25 / 0.5` projection constants, i.e. the cache is the exact L1 irradiance of that light list.
 
 The cache is rebuilt **per 8³-texel brick** (4 m), only where lighting changed, within a per-update budget of `DIRECT_BUDGET = 98 304` work units (texels × (1 + lights reaching the brick)). Switching a lamp on or off therefore costs one brick dispatch plus a refresh of the volume around it — never a restart.
@@ -456,7 +460,7 @@ Every option is an exported property on `GIManager` (and mirrored as `goygi/opti
 | **World Cache** | `chunk_mode` = `Off` / `Near Only` / `Balanced` / `Full`, `chunk_distance` |
 | **Surfaces** | `normal_maps`, `fast_triplanar` (one projection instead of three) |
 
-The four presets set: resolution+tier, VPL count, ray budget, update budget, filtering mode, and — for the two phone tiers — `fast_triplanar = true` and `normal_maps = false`, because on mobile the *level* shader is usually the expensive part, not the GI.
+The four presets set: resolution + tier, VPL count, ray budget, update budget, filtering mode, and — for the two phone tiers — `fast_triplanar = true` and `normal_maps = false`, because on mobile the *level* shader is usually the expensive part, not the GI.
 
 `GIManager.recommended_preset()` and `GIManager.device_info()` pick a tier from the adapter string and memory (Mali-G52 / Adreno 5xx / low memory → Low, Adreno 7xx / Mali-G710+ / Immortalis → High, desktop → Ultra).
 
@@ -507,7 +511,7 @@ Since 3.1 every path that disables the GI says so in the log with an `ERROR: GIM
 * `artifacts/*.png` — every debug view plus a wall close-up, a shot through the doorway and a GI-off comparison,
 * `artifacts/summary.txt` — the stats and the checks.
 
-`.github/workflows/ci.yml` runs exactly that on **Godot 4.7.2** with **Mesa's software Vulkan (lavapipe)** under Xvfb — a real Vulkan device in a container, no GPU needed — and fails the job when a script or shader error appears, when one of the four compute shaders did not actually compile, when the GI never starts, when the chunks never load, when the wall shows voxel blocks (second-derivative metric), or when switching the GI off makes the scene darker than it should (the ambient fallback regression). The screenshots are uploaded as artifacts for every push and pull request (and the ones in [What it looks like](#what-it-looks-like) are a snapshot of them).
+`.github/workflows/ci.yml` runs exactly that on **Godot 4.7.2** with **Mesa's software Vulkan (lavapipe)** under Xvfb — a real Vulkan device in a container, no GPU needed — and fails the job when a script or shader error appears, when one of the four compute shaders did not actually compile, when the GI never starts, when the chunks never load, when the wall shows voxel blocks (a second-derivative metric on a wall crop), or when switching the GI off makes the scene darker than it should (the ambient fallback regression). The screenshots are uploaded as artifacts for every push and pull request, and the job summary carries the numbers the checks used.
 
 Run it locally with no GPU at all:
 
@@ -519,6 +523,12 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: **a pull request is not reviewed until it carries pictures** — before/after screenshots, and for anything numerical the CI numbers it moves. GoyGI is a visual system; "it should work" is not evidence.
+
+## Changelog
+
+What changed in each release — with the CI numbers that prove it — lives in
+[CHANGELOG.md](CHANGELOG.md). Every release is tagged and packaged by
+`.github/workflows/release.yml`; [get the latest zip here](https://github.com/GoyDevv/GoyGI-Godot/releases/latest).
 
 ## License
 
