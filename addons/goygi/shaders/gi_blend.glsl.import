@@ -1,0 +1,13 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://c3qsyvmhoflem"
+valid=false
+
+[deps]
+
+source_file="res://addons/goygi/shaders/gi_blend.glsl"
+
+[params]
+

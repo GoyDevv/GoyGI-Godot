@@ -1,0 +1,15 @@
+# Godot
+.godot/
+*.translation
+export_presets.cfg
+.import/
+
+# GoyGI CI output (screenshots + logs are uploaded as workflow artifacts)
+artifacts/
+
+# editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

@@ -1,0 +1,144 @@
+; GoyGI demo / test project. The addon itself lives in res://addons/goygi -
+; copy that folder into any project (or use it as the base for your own) and
+; enable the plugin under Project > Project Settings > Plugins.
+;
+; This project doubles as the CI project: .github/workflows/ci.yml runs
+; test/gi_test_scene.tscn on the Mobile renderer (software Vulkan) and uploads
+; the screenshots it renders.
+
+config_version=5
+
+[application]
+
+config/name="GoyGI"
+config/description="Real-time global illumination for the Mobile renderer: bounce light, sky light and colour bleeding, no SDFGI."
+config/version="3.1.0"
+run/main_scene="res://test/gi_test_scene.tscn"
+config/features=PackedStringArray("4.7", "Mobile")
+config/icon="res://icon.svg"
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/vsync/vsync_mode=0
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/goygi/plugin.cfg")
+
+[goygi]
+
+; the test scene builds and owns its GIManager itself, so the runtime autoload
+; stays out of the way here
+runtime/auto_attach=false
+runtime/auto_emitters=true
+runtime/convert_materials=true
+editor_preview=false
+
+[rendering]
+
+renderer/rendering_method="mobile"
+renderer/rendering_method.mobile="mobile"
+textures/default_filters/anisotropic_filtering_level=0
+anti_aliasing/quality/msaa_3d=0
+lights_and_shadows/directional_shadow/soft_shadow_filter_quality=0
+
+[shader_globals]
+
+gi_filter={
+"type": "vec4",
+"value": Vector4(1, 0.5, 0, 0)
+}
+gi_occ={
+"type": "sampler3D",
+"value": ""
+}
+gi_occ_origin={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}
+gi_occ_inv={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}
+gi_near_r={
+"type": "sampler3D",
+"value": ""
+}
+gi_near_g={
+"type": "sampler3D",
+"value": ""
+}
+gi_near_b={
+"type": "sampler3D",
+"value": ""
+}
+gi_near_inv={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}
+gi_near_min={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}
+gi_near_max={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}
+gi_far_r={
+"type": "sampler3D",
+"value": ""
+}
+gi_far_g={
+"type": "sampler3D",
+"value": ""
+}
+gi_far_b={
+"type": "sampler3D",
+"value": ""
+}
+gi_far_inv={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}
+gi_far_min={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}
+gi_far_max={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}
+gi_params={
+"type": "vec4",
+"value": Vector4(1, 0, 1, 0)
+}
+gi_fallback={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}
+gi_chunk_mask={
+"type": "sampler2D",
+"value": ""
+}
+gi_chunk_info={
+"type": "vec4",
+"value": Vector4(8, 1, 1, 0)
+}
+gi_age={
+"type": "sampler3D",
+"value": ""
+}
+gi_debug={
+"type": "vec4",
+"value": Vector4(0, 0, 8, 0)
+}
+gi_roof={
+"type": "sampler2D",
+"value": ""
+}
+gi_roof_info={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}
