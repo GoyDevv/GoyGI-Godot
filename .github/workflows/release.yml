@@ -22,7 +22,9 @@ permissions:
 jobs:
   release:
     name: Package and publish
-    runs-on: ubuntu-latest
+    # Pinned, not `-latest`: the label is due to migrate images and a release
+    # should not change hands mid-flight.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
