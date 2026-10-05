@@ -36,7 +36,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             wget unzip xvfb libvulkan1 mesa-vulkan-drivers vulkan-tools \
             libx11-6 libxcursor1 libxinerama1 libxrandr2 libxi6 libxext6 \
-            libasound2 libfontconfig1 libgl1
+            libasound2 libpulse0 libfontconfig1 libgl1
           vulkaninfo --summary | head -40 || true
 
       - name: Download Godot ${{ env.GODOT_VERSION }}
@@ -54,24 +54,41 @@ jobs:
         # import has to run with real Vulkan (lavapipe) under Xvfb. In headless
         # mode Godot refuses ("Cannot import custom .glsl shaders when running in
         # headless mode") and the GI shaders would be missing at runtime.
+        # A real editor session is used rather than --import, because --import
+        # alone does not run the file system scan on a fresh checkout and the
+        # compute shaders then silently never get built.
         run: |
-          set -o pipefail
-          # the first import can exit non-zero while it keeps working; run it twice
-          timeout 420 xvfb-run -a -s "-screen 0 1280x720x24" \
-            godot --path . --import --rendering-driver vulkan 2>&1 | tee import.log || true
-          timeout 420 xvfb-run -a -s "-screen 0 1280x720x24" \
-            godot --path . --import --rendering-driver vulkan 2>&1 | tee -a import.log || true
-          echo "---- script / shader errors ----"
-          grep -nE "SCRIPT ERROR|Parse Error|Compile Error|COMPILATION ERROR" import.log || echo "none"
+          for i in 1 2; do
+            timeout 420 xvfb-run -a -s "-screen 0 1280x720x24" \
+              godot --path . --editor --quit-after 2000 \
+                    --rendering-driver vulkan --audio-driver Dummy 2>&1 | tee -a import.log || true
+            if ls .godot/imported/gi_volume.glsl-*.res >/dev/null 2>&1; then
+              break
+            fi
+          done
           echo "---- imported artefacts ----"
-          ls .godot/imported 2>/dev/null | head -20 || echo "nothing imported"
+          ls -1 .godot/imported 2>/dev/null | head -30 || echo "nothing imported"
+          echo "---- script / shader errors ----"
+          if grep -nE "SCRIPT ERROR|Parse Error|Compile Error|COMPILATION ERROR|Error importing" import.log; then
+            echo "::error::errors while importing (see above)"
+            exit 1
+          fi
+          echo "none"
+          missing=0
+          for s in gi_volume gi_direct gi_blend gi_meter; do
+            if ! ls .godot/imported/${s}.glsl-*.res >/dev/null 2>&1; then
+              echo "::error::${s}.glsl was not imported: a .glsl import needs a Vulkan device"
+              missing=1
+            fi
+          done
+          test $missing -eq 0
 
       - name: Render the visual test on the Mobile renderer
         run: |
           set -o pipefail
           xvfb-run -a -s "-screen 0 1280x720x24" \
             godot --path . --rendering-method mobile --rendering-driver vulkan \
-                  --resolution 1280x720 --verbose 2>&1 | tee render.log
+                  --resolution 1280x720 --audio-driver Dummy --verbose 2>&1 | tee render.log
           echo "exit=${PIPESTATUS[0]}" | tee -a render.log
 
       - name: Summarise the results
@@ -90,6 +107,7 @@ jobs:
           fi
 
       - name: Fail on script / shader / GI errors
+        if: always()
         run: |
           status=0
           if grep -nE "SCRIPT ERROR|Parse Error|Compile Error|compute shader error|Shader compilation failed|ERROR: .*gi_(volume|direct|blend|meter)" render.log import.log; then
