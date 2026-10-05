@@ -66,6 +66,8 @@ func _run() -> void:
 		frames += 1
 	gi.set_loading_boost(false)
 	_note("GI prepared after %d frames (%.1f s), %s" % [frames, (Time.get_ticks_msec() - t0) / 1000.0, _stats_line()])
+	_note("adapter: %s | rendering method: %s | RenderingDevice: %s" % [RenderingServer.get_video_adapter_name(),
+			str(ProjectSettings.get_setting("rendering/renderer/rendering_method")), str(RenderingServer.get_rendering_device() != null)])
 	var s := gi.get_stats()
 	_check("gpu active", bool(s["gpu"]) and gi.is_gpu_active(), str(s["gpu"]))
 	_check("near volume updated", int(s["near_updates"]) > 2, "updates=%d" % int(s["near_updates"]))

@@ -2851,6 +2851,7 @@ func _rt_init() -> void:
 		return
 	_shader = rd.shader_create_from_spirv(spirv)
 	if not _shader.is_valid():
+		push_error("GIManager: the RenderingDevice refused the GI compute shader (invalid shader RID) - GI disabled, direct light only.")
 		_gpu_failed = true
 		return
 	_pipeline = rd.compute_pipeline_create(_shader)
@@ -2918,9 +2919,11 @@ func _rt_init() -> void:
 		push_warning("GIManager: light meter shader unavailable (eye adaptation falls back)")
 	_dummy_age = _rt_tex3d(Vector3i.ONE, RenderingDevice.DATA_FORMAT_R32_SFLOAT)
 	if not _rt_init_direct():
+		push_error("GIManager: the direct light cache could not be created - GI disabled, direct light only.")
 		_gpu_failed = true
 		return
 	_gpu_init_done = true
+	print("GIManager: GPU pipelines ready - occupancy %s, direct cache %s, near volume %s" % [_occ_size, _dir_size, _near.size])
 
 
 ## Direct light cache (3 x RGBA16F), albedo grid (RGBA8), roof map (R32F) and
@@ -2934,6 +2937,7 @@ func _rt_init_direct() -> bool:
 		return false
 	_dir_shader = rd.shader_create_from_spirv(spirv)
 	if not _dir_shader.is_valid():
+		push_error("GIManager: the RenderingDevice refused the direct light compute shader (invalid shader RID).")
 		return false
 	_dir_pipeline = rd.compute_pipeline_create(_dir_shader)
 	_dir_tex.clear()
