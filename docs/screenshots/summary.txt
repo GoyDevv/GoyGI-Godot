@@ -1,5 +1,5 @@
 GoyGI visual test
-GI prepared after 8 frames (28.0 s), near 81920 voxels, cache 15 chunks, 0 VPLs, cpu 0.40 ms
+GI prepared after 8 frames (35.2 s), near 81920 voxels, cache 15 chunks, 0 VPLs, cpu 0.35 ms
 adapter: llvmpipe (LLVM 15.0.7, 256 bits) | rendering method: mobile | RenderingDevice: true
 PASS gpu active (true)
 PASS near volume updated (updates=6)
@@ -14,18 +14,35 @@ shot 06_second_room (1280x720)
 shot 07_wall_closeup (1280x720)
 shot 08_gi_off (1280x720)
 shot 09_gi_back_on (1280x720)
-blockiness (wall crop, lower is smoother): 0.00189
-PASS wall is smooth (no voxel blocks) (blockiness=0.00189 (limit 0.06))
-mean luminance: GI on 0.5376, GI off 0.5753 (107 % of GI on)
-PASS GI off keeps the scene lit (ambient fallback) (off=0.5753 on=0.5376)
+blockiness (wall crop, lower is smoother): 0.00184
+PASS wall is smooth (no voxel blocks) (blockiness=0.00184 (limit 0.06))
+mean luminance: GI on 0.5373, GI off 0.5753 (107 % of GI on)
+PASS GI off keeps the scene lit (ambient fallback) (off=0.5753 on=0.5373)
 PASS GI reaches the second room (lum=0.3576)
-CPU 0.40 ms/update, 0 VPLs (0 dynamic), 2 static lights
+shot 10_ceiling_look_up (1280x720)
+ceiling crop: blockiness 0.00046, mean luminance 0.4974
+PASS ceiling is smooth (no voxel blocks) (blockiness=0.00046 (limit 0.06))
+PASS ceiling is lit, not blown out (lum=0.4974 (want 0.015..0.92))
+lamp x3: 93.2 % of the change is on screen after 5 frames (total diff 0.2755)
+PASS a light change lands within 5 frames (93 % after 5 frames (want > 60 %))
+prop moved + rebuild: 23.6 ms, 18/90 direct-cache bricks dirty (20.0 %), direct work 9216 units
+PASS moving a prop rebuilds only its part of the map (18/90 bricks dirty (want < 25 %))
+lamp added at run time: emitter attached true, frame changed by 0.1038
+PASS a lamp added at run time gets an emitter (GIEmitter child: true)
+PASS a lamp added at run time lights the scene (mean |change| = 0.1038)
+CPU 0.35 ms/update, 0 VPLs (0 dynamic), 2 static lights
 occupancy (80, 28, 144) @ 0.25 m, near (64, 20, 64) @ 0.45 m, cache (24, 8, 40) @ 1.00 m
 
 checks:
   PASS gpu active (true)
   PASS near volume updated (updates=6)
   PASS chunks required loaded (15/15 (mode 2))
-  PASS wall is smooth (no voxel blocks) (blockiness=0.00189 (limit 0.06))
-  PASS GI off keeps the scene lit (ambient fallback) (off=0.5753 on=0.5376)
+  PASS wall is smooth (no voxel blocks) (blockiness=0.00184 (limit 0.06))
+  PASS GI off keeps the scene lit (ambient fallback) (off=0.5753 on=0.5373)
   PASS GI reaches the second room (lum=0.3576)
+  PASS ceiling is smooth (no voxel blocks) (blockiness=0.00046 (limit 0.06))
+  PASS ceiling is lit, not blown out (lum=0.4974 (want 0.015..0.92))
+  PASS a light change lands within 5 frames (93 % after 5 frames (want > 60 %))
+  PASS moving a prop rebuilds only its part of the map (18/90 bricks dirty (want < 25 %))
+  PASS a lamp added at run time gets an emitter (GIEmitter child: true)
+  PASS a lamp added at run time lights the scene (mean |change| = 0.1038)

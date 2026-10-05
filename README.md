@@ -37,6 +37,13 @@ The images below are produced by the CI job — a real render on the **Mobile** 
 | **beauty shot** | **voxel + chunk debug views** |
 | ![beauty](docs/screenshots/beauty.png) | ![voxels](docs/screenshots/voxels.png) |
 
+<p align="center">
+  <img src="docs/screenshots/ceiling.png" width="620" alt="The ceiling from below"><br>
+  <sub><b>The ceiling, straight up.</b> The hardest surface for a voxel volume: it sits right under the sky-lit voxels
+  above the roof slab, so any error there shows as a glowing or blocky ceiling. It has a CI check of its own —
+  smoothness <code>0.00046</code> (limit 0.06) and lit but not blown out (<code>0.4974</code>).</sub>
+</p>
+
 | | |
 |---|---|
 | **Renderer** | Vulkan 1.1, `--rendering-method mobile`. `Forward+` works too; `Compatibility` runs with the GI switched off |
