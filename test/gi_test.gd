@@ -22,8 +22,8 @@ extends Node3D
 ##     xvfb-run -a godot --path . --rendering-method mobile --rendering-driver vulkan
 
 const OUT_DIR := "res://artifacts"
-const READY_TIMEOUT_MS := 90000 # wall clock budget for the GI to be prepared
-const READY_TIMEOUT_FRAMES := 4000 # ... and a frame budget, whatever is shorter
+const READY_TIMEOUT_MS := 180000 # wall clock budget for the GI to be prepared
+const READY_TIMEOUT_FRAMES := 6000 # ... and a frame budget, whatever is shorter
 const SETTLE := 20 # frames between "change something" and "look at it"
 const SETTLE_MAX_MS := 20000 # per shot wall clock cap (software Vulkan is slow)
 
@@ -61,7 +61,13 @@ func _run() -> void:
 	# ---- let the GI come up
 	gi.set_loading_boost(true)
 	var frames := 0
-	while frames < READY_TIMEOUT_FRAMES and (Time.get_ticks_msec() - t0) < READY_TIMEOUT_MS and not gi.is_prepared():
+	# is_prepared() is true as long as the GPU has not come up, so it cannot be
+	# used on its own: wait for the pipelines AND for the world around the camera.
+	while frames < READY_TIMEOUT_FRAMES and (Time.get_ticks_msec() - t0) < READY_TIMEOUT_MS:
+		var st := gi.get_stats()
+		if bool(st["gpu"]) and gi.is_gpu_active() and int(st["near_updates"]) >= 6 \
+				and int(st["chunks_required_loaded"]) >= int(st["chunks_required"]) and not bool(st["direct_building"]):
+			break
 		await get_tree().process_frame
 		frames += 1
 	gi.set_loading_boost(false)
@@ -151,11 +157,11 @@ func _build_level() -> void:
 
 	sun = DirectionalLight3D.new()
 	sun.position = Vector3(-8, 12, 6)
-	sun.look_at(Vector3(0, 0, 0), Vector3.UP)
 	sun.light_energy = 1.4
 	sun.light_color = Color(1.0, 0.95, 0.86)
 	sun.shadow_enabled = true
 	add_child(sun)
+	sun.look_at(Vector3(0, 0, 0), Vector3.UP)
 
 	# ---- room 1 (the lit one): floor, ceiling, 4 walls, a doorway in the -Z wall
 	_box(Vector3(0, -0.1, 0), Vector3(12, 0.2, 12), Color(0.62, 0.6, 0.56))
