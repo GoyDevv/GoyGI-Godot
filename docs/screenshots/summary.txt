@@ -1,0 +1,31 @@
+GoyGI visual test
+GI prepared after 8 frames (28.0 s), near 81920 voxels, cache 15 chunks, 0 VPLs, cpu 0.40 ms
+adapter: llvmpipe (LLVM 15.0.7, 256 bits) | rendering method: mobile | RenderingDevice: true
+PASS gpu active (true)
+PASS near volume updated (updates=6)
+PASS chunks required loaded (15/15 (mode 2))
+shot 00_beauty_default (1280x720)
+shot 01_gi_only (1280x720)
+shot 02_voxels (1280x720)
+shot 03_gi_age (1280x720)
+shot 04_chunks (1280x720)
+shot 05_leak_guard (1280x720)
+shot 06_second_room (1280x720)
+shot 07_wall_closeup (1280x720)
+shot 08_gi_off (1280x720)
+shot 09_gi_back_on (1280x720)
+blockiness (wall crop, lower is smoother): 0.00189
+PASS wall is smooth (no voxel blocks) (blockiness=0.00189 (limit 0.06))
+mean luminance: GI on 0.5376, GI off 0.5753 (107 % of GI on)
+PASS GI off keeps the scene lit (ambient fallback) (off=0.5753 on=0.5376)
+PASS GI reaches the second room (lum=0.3576)
+CPU 0.40 ms/update, 0 VPLs (0 dynamic), 2 static lights
+occupancy (80, 28, 144) @ 0.25 m, near (64, 20, 64) @ 0.45 m, cache (24, 8, 40) @ 1.00 m
+
+checks:
+  PASS gpu active (true)
+  PASS near volume updated (updates=6)
+  PASS chunks required loaded (15/15 (mode 2))
+  PASS wall is smooth (no voxel blocks) (blockiness=0.00189 (limit 0.06))
+  PASS GI off keeps the scene lit (ambient fallback) (off=0.5753 on=0.5376)
+  PASS GI reaches the second room (lum=0.3576)

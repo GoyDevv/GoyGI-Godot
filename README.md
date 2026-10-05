@@ -1,10 +1,27 @@
 # GoyGI
 
+[![Build & visual tests](https://github.com/GoyDevv/GoyGI-Godot/actions/workflows/ci.yml/badge.svg)](https://github.com/GoyDevv/GoyGI-Godot/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Godot 4.7](https://img.shields.io/badge/Godot-4.7.2-478cbf.svg)
+![Renderer: Mobile](https://img.shields.io/badge/renderer-Mobile%20%2F%20Vulkan-7fd4ff.svg)
+
 **Real-time global illumination for the Godot **Mobile** renderer. No SDFGI, no VoxelGI, no lightmap baking, no phone-specific build — bounce light, sky light and colour bleeding, live in the editor and at runtime on a Vulkan 1.1 phone.**
 
 <p align="center">
   <img src=".github/banner.svg" alt="GoyGI" width="720">
 </p>
+
+## What it looks like
+
+All of the images below are rendered **by CI** on the Mobile renderer (software Vulkan, no GPU) every push — not by hand, not on a phone. `docs/screenshots/summary.txt` is the report they came with.
+
+| indirect light only (`debug_view = GI Only`) | bounce through a doorway into the second room |
+|---|---|
+| ![GI only](docs/screenshots/gi_only.png) | ![second room](docs/screenshots/second_room.png) |
+| **wall close-up** (the old "pure boxes" case) | **GI switched off** — still plain-Godot lit |
+| ![wall close-up](docs/screenshots/wall_closeup.png) | ![GI off](docs/screenshots/gi_off.png) |
+| **beauty shot** | **voxel debug view** |
+| ![beauty](docs/screenshots/beauty.png) | ![voxels](docs/screenshots/voxels.png) |
 
 `SDFGI` and `VoxelGI` are **Forward+ only**. On `Mobile` (and on `Compatibility`) Godot gives you direct light, a sky, an ambient term and reflection probes — and nothing that moves light from a lamp to the wall next to it. GoyGI adds that missing piece as a plugin: an irradiance volume plus a world-space light cache, both computed in Vulkan compute shaders, both real-time.
 
@@ -33,6 +50,7 @@ Everything below was found by reading the maths, not by tuning knobs, and every 
 * **Switching the GI off made the scene look worse than plain Godot.** The GoyGI materials disable Godot's ambient light while the GI is on (so the sky is not counted twice), and with the GI off nothing gave it back — everything collapsed to direct light. The Environment's ambient light (colour, sky contribution and energy) is now fed through the ambient fallback whenever the GI is off.
 * **Mobile cost.** The sampling path went from an 8-iteration loop with 4–8 occupancy taps per pixel (≈40 texture fetches) to 3 trilinear fetches + 1–2 occupancy taps + 1 roof tap. The Low and Medium presets now also turn on `fast_triplanar` and off `normal_maps`, because on a phone the level shader is usually the expensive part, not the GI.
 * **Two scripts did not even parse** on current Godot (`var srgb := …get_format() != …` type inference, and a 4-argument `RenderingDevice.texture_update`). Found by the CI import step.
+* **Stale `.glsl.import` files could disable the GI silently.** The committed import metadata pointed at a SPIR-V build from an older engine, so the editor considered the compute shaders "already imported", never built them, and `GIManager` quietly fell back to direct light. CI now imports the shaders from scratch on every run and fails if any of the four is missing — see [Troubleshooting](#troubleshooting). Every failure path that used to disable the GI in silence now logs an explicit `ERROR: GIManager: ...`.
 
 ---
 
@@ -56,10 +74,12 @@ Everything below was found by reading the maths, not by tuning knobs, and every 
   - [10. Temporal accumulation](#10-temporal-accumulation)
   - [11. Why the voxel grid used to show up as boxes](#11-why-the-voxel-grid-used-to-show-up-as-boxes)
   - [12. The mobile budget](#12-the-mobile-budget)
+- [What it looks like](#what-it-looks-like)
 - [Fixed in 3.1](#fixed-in-31)
 - [Settings and quality](#settings-and-quality)
 - [Debug views](#debug-views)
 - [Performance on phones](#performance-on-phones)
+- [Troubleshooting](#troubleshooting)
 - [Known limitations](#known-limitations)
 - [Tests and CI](#tests-and-ci)
 - [Contributing](#contributing)
@@ -456,6 +476,23 @@ The four presets set: resolution+tier, VPL count, ray budget, update budget, fil
 * `detail_occlusion = false` removes 5 occupancy taps per pixel on surfaces.
 * If a scene has no collision, GoyGI builds trimesh helper colliders on layer 20 — on big levels that pass is the most expensive part of startup, so give your static geometry real collision when you can.
 
+## Troubleshooting
+
+**The GI suddenly stopped working / the log says `GIManager: cannot load .../gi_volume.glsl`.**
+A `.glsl` compute shader is compiled to SPIR-V by the *editor* when it is imported, and the `.import` file next to it records where that result went. After a Godot upgrade (or a copy/paste of a project without `.godot/`) that record can point at a build that does not exist any more; the editor then treats the shader as "already imported" and skips it, so at runtime `load()` fails and GoyGI disables itself with `direct light only`.
+
+```bash
+rm -rf .godot
+rm -f addons/goygi/shaders/*.glsl.import
+# reopen the project (the editor rebuilds all four shaders)
+```
+
+Since 3.1 every path that disables the GI says so in the log with an `ERROR: GIManager: ...` line, so this never fails silently again. CI does the `rm` above on every run, which is how the trap was found in the first place.
+
+**Everything is very dark with the GI on.** The camera is probably outside the near volume and outside the loaded chunk range: check `chunk_mode` / `chunk_distance`, or raise `ambient` a little.
+
+**The GI is too slow.** See [Performance on phones](#performance-on-phones); `update_rate`, `filtering = Fast`, `fast_triplanar` and `chunk_mode = Near Only` are the four knobs that matter.
+
 ## Known limitations
 
 * `Compatibility` renderer: no `RenderingDevice` → the GI is disabled (direct light only).
@@ -470,7 +507,7 @@ The four presets set: resolution+tier, VPL count, ray budget, update budget, fil
 * `artifacts/*.png` — every debug view plus a wall close-up, a shot through the doorway and a GI-off comparison,
 * `artifacts/summary.txt` — the stats and the checks.
 
-`.github/workflows/ci.yml` runs exactly that on **Godot 4.7.2** with **Mesa's software Vulkan (lavapipe)** under Xvfb — a real Vulkan device in a container, no GPU needed — and fails the job when a script or shader error appears, when the GI never starts, when the chunks never load, when the wall shows voxel blocks (second-derivative metric), or when switching the GI off makes the scene darker than it should (the ambient fallback regression). The screenshots are uploaded as artifacts for every push and pull request.
+`.github/workflows/ci.yml` runs exactly that on **Godot 4.7.2** with **Mesa's software Vulkan (lavapipe)** under Xvfb — a real Vulkan device in a container, no GPU needed — and fails the job when a script or shader error appears, when one of the four compute shaders did not actually compile, when the GI never starts, when the chunks never load, when the wall shows voxel blocks (second-derivative metric), or when switching the GI off makes the scene darker than it should (the ambient fallback regression). The screenshots are uploaded as artifacts for every push and pull request (and the ones in [What it looks like](#what-it-looks-like) are a snapshot of them).
 
 Run it locally with no GPU at all:
 
