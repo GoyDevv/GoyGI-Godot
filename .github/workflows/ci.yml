@@ -58,16 +58,21 @@ jobs:
         # alone does not run the file system scan on a fresh checkout and the
         # compute shaders then silently never get built.
         run: |
-          for i in 1 2; do
-            timeout 420 xvfb-run -a -s "-screen 0 1280x720x24" \
-              godot --path . --editor --quit-after 2000 \
-                    --rendering-driver vulkan --audio-driver Dummy 2>&1 | tee -a import.log || true
-            if ls .godot/imported/gi_volume.glsl-*.res >/dev/null 2>&1; then
-              break
-            fi
-          done
+          echo "---- committed import metadata ----"
+          head -20 addons/goygi/shaders/gi_volume.glsl.import
+          # A committed .import file carries the destination hash of whichever
+          # Godot built it. If that hash no longer matches, the editor can treat
+          # the shader as "already imported" and skip it while the compiled .res
+          # does not exist - which is exactly how the GI ends up disabling itself
+          # with "cannot load gi_volume.glsl". Throw them away and rebuild.
+          rm -f addons/goygi/shaders/*.glsl.import
+          timeout 400 xvfb-run -a -s "-screen 0 1280x720x24" \
+            godot --path . --editor --quit-after 3000 --verbose \
+                  --rendering-driver vulkan --audio-driver Dummy 2>&1 | tee import.log || true
           echo "---- imported artefacts ----"
-          ls -1 .godot/imported 2>/dev/null | head -30 || echo "nothing imported"
+          ls -1 .godot/imported 2>/dev/null | head -40 || echo "nothing imported"
+          echo "---- glsl import messages ----"
+          grep -inE "glsl|RDShader|importer|reimport|skipped" import.log | head -40 || echo "none"
           echo "---- script / shader errors ----"
           if grep -nE "SCRIPT ERROR|Parse Error|Compile Error|COMPILATION ERROR|Error importing" import.log; then
             echo "::error::errors while importing (see above)"
