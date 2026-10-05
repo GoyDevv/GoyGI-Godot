@@ -211,6 +211,23 @@ var editor_preview := false
 	set(v):
 		chunk_distance = v
 		_option_changed(&"chunk_distance")
+@export_group("Distance")
+## Where the fine (near) volume sits.
+## `Camera`: it follows the player, so the detail is where you look (the phone
+## default). `Fixed`: it stays centred on the map - the GI then has no render
+## distance at all, nothing ever enters or leaves the volume and nothing fades.
+## That is the highest quality setting on a small level.
+@export_enum("Camera", "Fixed") var near_mode: int = 0:
+	set(v):
+		near_mode = v
+		_option_changed(&"near_mode")
+## Never drop the GI beyond a radius: every chunk of the world cache is computed
+## and kept up to date wherever the camera is (same as chunk_mode = Full, but
+## explicit and independent of the chunk mode).
+@export var unlimited_distance: bool = false:
+	set(v):
+		unlimited_distance = v
+		_option_changed(&"unlimited_distance")
 @export_group("Surfaces")
 ## Normal maps on GoyGI surfaces.
 @export var normal_maps: bool = true:
@@ -314,6 +331,8 @@ const OPTION_KEYS := {
 	"gi_filtering": &"filtering",
 	"gi_chunk_mode": &"chunk_mode",
 	"gi_chunk_distance": &"chunk_distance",
+	"gi_near_mode": &"near_mode",
+	"gi_unlimited_distance": &"unlimited_distance",
 	"normal_maps": &"normal_maps",
 	"fast_triplanar": &"fast_triplanar",
 	"gi_debug_view": &"debug_view",
@@ -475,7 +494,14 @@ var _ambient := Color(0, 0, 0)
 var _env_scale := 1.0
 var _chunk_mode := ChunkMode.NEARBY
 var _chunk_distance := 24.0
+var _unlimited := false # keep every chunk up to date, wherever the camera is
+var _near_fixed := false # the near volume is pinned to the map, not to the camera
 var _occ_proxy: Texture3DRD
+# per-collider signature + world AABB, so a rebuild can be scoped to the part of
+# the map that actually moved instead of invalidating everything
+var _node_sig: Dictionary = {}
+var _mesh_sig := 0
+var _rescan_t := 2.0 # s until the next "did anything new appear?" scan
 
 # adaptive update rate
 const MOTION_EPS := 0.02
@@ -647,6 +673,8 @@ func start() -> void:
 	_running = true
 	set_process(true)
 	add_to_group(&"gi_manager")
+	if is_inside_tree() and not get_tree().node_added.is_connected(_on_node_added):
+		get_tree().node_added.connect(_on_node_added)
 	# keeps integrating while the game is paused (menu / loading screen backdrop)
 	if not Engine.is_editor_hint():
 		process_mode = Node.PROCESS_MODE_ALWAYS
@@ -677,6 +705,7 @@ func start() -> void:
 	var t0 := Time.get_ticks_usec()
 	_build_occupancy()
 	_geo_sig = _geometry_signature()
+	_changed_region() # seed the per-collider signatures (everything counts as new once)
 	print("GIManager: occupancy %s cells built in %.1f ms" % [_occ_size, (Time.get_ticks_usec() - t0) / 1000.0])
 	_setup_cache()
 	_gpu_init_requested = true
@@ -689,6 +718,8 @@ func stop() -> void:
 		return
 	_running = false
 	_opts_live = false
+	if is_inside_tree() and get_tree().node_added.is_connected(_on_node_added):
+		get_tree().node_added.disconnect(_on_node_added)
 	set_process(false)
 	_auto_teardown()
 	GoyGIConfig.unlisten(_on_settings_changed)
@@ -773,31 +804,126 @@ func _reset_state() -> void:
 var _geo_sig := 0
 var _geo_check_t := 0.0
 
-func _geometry_signature() -> int:
+static func _shape_dim(sh: Shape3D) -> Variant:
+	if sh is BoxShape3D:
+		return (sh as BoxShape3D).size
+	if sh is SphereShape3D:
+		return (sh as SphereShape3D).radius
+	if sh is CapsuleShape3D:
+		return Vector2((sh as CapsuleShape3D).radius, (sh as CapsuleShape3D).height)
+	if sh is CylinderShape3D:
+		return Vector2((sh as CylinderShape3D).radius, (sh as CylinderShape3D).height)
+	if sh is ConcavePolygonShape3D:
+		return (sh as ConcavePolygonShape3D).get_faces().size()
+	return sh.get_instance_id()
+
+
+## Every collider the occupancy grid is built from, as [instance id, signature,
+## world AABB]. The signature is what tells a rebuild which colliders changed, so
+## it can refresh that part of the map and leave the rest alone.
+func _geometry_nodes() -> Array:
+	var out: Array = []
+	var root: Node = occupancy_root if occupancy_root != null and is_instance_valid(occupancy_root) else get_parent()
+	if root == null:
+		return out
+	for n in root.find_children("*", "CollisionShape3D", true, false):
+		var cs := n as CollisionShape3D
+		if cs.disabled or cs.shape == null or not (cs.get_parent() is StaticBody3D):
+			continue
+		var body := cs.get_parent() as StaticBody3D
+		if (body.collision_layer & collision_mask) == 0:
+			continue
+		var info := _shape_info(cs)
+		if info.is_empty():
+			continue
+		out.append([cs.get_instance_id(), hash([cs.global_transform, _shape_dim(cs.shape)]), info["aabb"]])
+	return out
+
+
+## Meshes / CSG are only part of the grid when the occupancy source asks for
+## them (in AUTO, GoyGISetup gives meshes without collision helper colliders, so
+## the collider walk already sees them).
+func _mesh_signature() -> int:
+	if occupancy_source != 2:
+		return 0
 	var root: Node = occupancy_root if occupancy_root != null and is_instance_valid(occupancy_root) else get_parent()
 	if root == null:
 		return 0
 	var h := 0
-	for n in root.find_children("*", "CollisionShape3D", true, false):
-		var cs := n as CollisionShape3D
-		if cs.disabled or cs.shape == null:
-			continue
-		var sh := cs.shape
-		var dim: Variant = sh.get_instance_id()
-		if sh is BoxShape3D:
-			dim = (sh as BoxShape3D).size
-		elif sh is SphereShape3D:
-			dim = (sh as SphereShape3D).radius
-		elif sh is CapsuleShape3D:
-			dim = Vector2((sh as CapsuleShape3D).radius, (sh as CapsuleShape3D).height)
-		elif sh is CylinderShape3D:
-			dim = Vector2((sh as CylinderShape3D).radius, (sh as CylinderShape3D).height)
-		elif sh is ConcavePolygonShape3D:
-			dim = (sh as ConcavePolygonShape3D).get_faces().size()
-		h = hash([h, cs.global_transform, dim])
 	for n in root.find_children("*", "CSGShape3D", true, false):
 		h = hash([h, (n as Node3D).global_transform])
+	for n in root.find_children("*", "MeshInstance3D", true, false):
+		h = hash([h, (n as Node3D).global_transform])
 	return h
+
+
+func _geometry_signature() -> int:
+	var h := _mesh_signature()
+	for e: Array in _geometry_nodes():
+		h = hash([h, e[1]])
+	return h
+
+
+## Union AABB of the colliders that moved, appeared or disappeared since the last
+## call, merged with the space a moved collider used to occupy. An empty AABB
+## means "nothing changed"; `_occ_aabb` means "too much changed, rebuild it all".
+func _changed_region() -> AABB:
+	if _mesh_signature() != _mesh_sig:
+		_mesh_sig = _mesh_signature()
+		return _occ_aabb
+	var box := AABB()
+	var first := true
+	var seen := {}
+	for e: Array in _geometry_nodes():
+		var id: int = e[0]
+		var sig: int = e[1]
+		var aabb: AABB = e[2]
+		seen[id] = true
+		var prev: Array = _node_sig.get(id, [])
+		if prev.is_empty() or int(prev[0]) != sig:
+			box = aabb if first else box.merge(aabb)
+			first = false
+			if not prev.is_empty():
+				box = box.merge(prev[1]) # where it used to be: the gap it left needs light too
+		_node_sig[id] = [sig, aabb]
+	for id: int in _node_sig.keys():
+		if not seen.has(id):
+			box = box.merge(_node_sig[id][1])
+			_node_sig.erase(id)
+			first = false
+	return box if not first else AABB()
+
+
+## Attaches GoyGI to everything that appeared after start(): a new lamp gets an
+## emitter, a new mesh gets the GoyGI surface shader, and the GI is told to light
+## them. A light added in the editor (or spawned at run time) used to do nothing
+## at all until the scene was reopened - which is exactly what "the GI does
+## nothing in the editor after I add a light" was. Cheap and idempotent:
+## GoyGISetup skips lights that already have an emitter and materials that have
+## already been converted, so calling it repeatedly costs a tree walk.
+func rescan() -> void:
+	if not auto_setup or not _running:
+		return
+	var root := _scene_root()
+	if root == null:
+		return
+	var added := GoyGISetup.add_emitters(root)
+	if not added.is_empty():
+		_auto_emitters.append_array(added)
+		_lights_dirty = true
+		_mark_motion()
+	if bool(ProjectSettings.get_setting("goygi/runtime/convert_materials", true)):
+		if GoyGISetup.convert_materials(root, Engine.is_editor_hint()) > 0:
+			_mark_motion()
+
+
+## New node in the tree: check on the next process frame whether it is something
+## GoyGI needs to pick up (a light, a mesh, a collider).
+func _on_node_added(node: Node) -> void:
+	if not _running or not auto_setup:
+		return
+	if node is Light3D or node is GeometryInstance3D or node is CollisionShape3D:
+		_rescan_t = 0.0
 
 
 var _placeholder: ImageTexture3D
@@ -1042,7 +1168,13 @@ func _apply_options(prop: StringName) -> void:
 	var r := clampf(response, 0.0, 1.0)
 	_tune = Vector4(lerpf(0.08, 0.01, r), lerpf(0.45, 0.1, r), lerpf(0.75, 1.0, r), lerpf(0.4, 0.85, r))
 	_denoise_w = [0.0, 0.2, 0.35, 0.5][clampi(spatial_filter, 0, 3)]
-	_display_smooth = [0.0, 0.35, 0.6, 0.85][clampi(spatial_filter, 0, 3)]
+	# The DISPLAY pass (gi_blend.glsl) runs every rendered frame, so its neighbour
+	# blur is not a fixed amount of smoothing: it scales with the frame rate, and
+	# at 0.6 it was a second, much heavier blur on top of the per-voxel denoise.
+	# That is what made fine GI detail look soft and a change look like it was
+	# "slowly resolving". The volume pass does the denoising (denoise_w above);
+	# this stays low, so the picture keeps its detail and reacts at once.
+	_display_smooth = [0.0, 0.15, 0.25, 0.4][clampi(spatial_filter, 0, 3)]
 	_adaptive = adaptive_response
 	_gov_on = auto_budget
 	if not _gov_on:
@@ -1063,6 +1195,14 @@ func _apply_options(prop: StringName) -> void:
 		_on_lighting_changed(true)
 	_chunk_mode = clampi(chunk_mode, 0, 3) as ChunkMode
 	_chunk_distance = maxf(chunk_distance, 4.0)
+	_near_fixed = near_mode == 1
+	_unlimited = unlimited_distance
+	if _unlimited:
+		_chunk_mode = ChunkMode.LOAD_ALL
+		if not _all_loaded():
+			_load_all_request = true
+	if prop == &"near_mode":
+		_near.needs_reset = true
 	if prop in [&"multi_bounce", &"bounce_strength", &"gi_bounces", &"gi_bounce_strength", &"bounce"]:
 		_on_lighting_changed(true)
 	# any lighting-related change counts as motion -> full update rate right away
@@ -1138,12 +1278,14 @@ func _process(delta: float) -> void:
 		if not _running:
 			return
 		# walls / props moved, added or removed: rebuild the occupancy grid
+		# 4 x a second rather than once a second: an edit used to take up to a
+		# second to show up, which read as "the GI is stuck"
 		_geo_check_t -= delta
 		if _geo_check_t <= 0.0:
-			_geo_check_t = 1.0
-			var sig := _geometry_signature()
-			if sig != _geo_sig:
-				rebuild()
+			_geo_check_t = 0.25
+			var region := _changed_region()
+			if region.size.x > 0.0 or region.size.y > 0.0 or region.size.z > 0.0:
+				rebuild(region)
 				return
 		# the editor only redraws on changes: keep the viewport refreshing so the
 		# GI converges and follows light edits live
@@ -1213,6 +1355,12 @@ func _rt_blend(uset: RID, pc: PackedByteArray, groups: Vector3i) -> void:
 
 func _process_gi(delta: float) -> void:
 	_update_param_globals()
+	# lights / meshes that appeared after start() (a lamp added in the editor, an
+	# object spawned at run time) are picked up here - see rescan()
+	_rescan_t -= delta
+	if _rescan_t <= 0.0:
+		_rescan_t = 2.0
+		rescan()
 	if _gpu_failed or _rd == null:
 		return
 	if not _gpu_ok:
@@ -1476,6 +1624,15 @@ func _make_params() -> PackedByteArray:
 ## climbing never moves it), otherwise it moves with hysteresis.
 func _place_near(cam: Camera3D) -> void:
 	var c := _near
+	if _near_fixed:
+		# pinned to the map: the volume never moves, so nothing ever enters or
+		# leaves it and the GI has no render distance at all
+		var mid := _geo_aabb.get_center()
+		var ft := Vector3i(floori(mid.x / c.cell) - c.size.x / 2, floori((_geo_aabb.position.y - 0.5) / c.cell),
+				floori(mid.z / c.cell) - c.size.z / 2)
+		if c.needs_reset or ft != c.base:
+			c.base = ft
+		return
 	var fwd := -cam.global_basis.z
 	fwd.y = 0.0
 	if fwd.length() > 0.01:
@@ -2070,8 +2227,12 @@ func _ensure_cache_alloc() -> void:
 ## the whole chunk cache and the near volume every single time, which is why
 ## every edit in the editor showed raw, unconverged voxels until the map had
 ## been recomputed from scratch (and why editing was so expensive).
-func rebuild() -> void:
-	if _running and _gpu_ok and _gpu_init_done and not _near.tex.is_empty() and _soft_rebuild():
+func rebuild(region := AABB()) -> void:
+	# No region given (a script moved something, or the geometry changed by itself):
+	# ask the colliders what actually moved, which is what lets the rebuild touch
+	# only that part of the map.
+	var r: AABB = region if region.size.x > 0.0 else _changed_region()
+	if _running and _gpu_ok and _gpu_init_done and not _near.tex.is_empty() and _soft_rebuild(r):
 		return
 	var was := _running
 	stop()
@@ -2079,13 +2240,25 @@ func rebuild() -> void:
 		start()
 
 
-func _soft_rebuild() -> bool:
+## Re-voxelizes the level and refreshes only what the change can reach.
+##
+## Every edit used to dirty the WHOLE direct light cache, mark EVERY chunk stale
+## and force 8 full-volume updates (cold = 1, so every voxel re-traced its sky
+## rays 8 times in a row). That is why moving one prop hitched, and why on a
+## phone-sized map it could stall for seconds.
+##
+## `region` is the world AABB the caller knows changed; when it is small enough
+## only that part of the direct cache is recomputed, only the chunks near it go
+## stale, and the near volume refreshes fast inside it (the sregion path), while
+## the rest of the map keeps the light it already had.
+func _soft_rebuild(region := AABB()) -> bool:
 	if _rd == null or _gpu_failed:
 		return false
 	var old_size := _occ_size
+	var old_origin := _occ_origin
 	var t0 := Time.get_ticks_usec()
 	_build_occupancy()
-	if _occ_bytes.is_empty() or _occ_size != old_size or _roof_bytes.is_empty():
+	if _occ_bytes.is_empty() or _occ_size != old_size or _occ_origin != old_origin or _roof_bytes.is_empty():
 		return false # a different grid: the GPU resources have to be re-created
 	_setup_cache()
 	_geo_sig = _geometry_signature()
@@ -2094,13 +2267,22 @@ func _soft_rebuild() -> bool:
 	RenderingServer.call_on_render_thread(_rt_upload_world.bind(occ, alb, _roof_bytes.duplicate()))
 	_alb_bytes = PackedByteArray() # uploaded
 	_ensure_cache_alloc()
-	_queue_direct(_occ_aabb) # the whole direct cache is stale (the geometry moved)
-	_lights_dirty = true
-	_static_boost = maxi(_static_boost, 8)
-	_on_lighting_changed(true)
+	var whole := _occ_aabb.size.x * _occ_aabb.size.y * _occ_aabb.size.z
+	var local := region.size.x > 0.0 and (region.size.x * region.size.y * region.size.z) < whole * 0.5
+	if local:
+		var r := region.grow(2.5) # shadows reach past the collider that moved
+		_queue_direct(r)
+		_add_sregion(r.grow(3.0)) # the volume around it: full updates, fast blend
+		_mark_stale_around(r.get_center(), maxf(r.size.x, r.size.z) * 0.5 + 8.0)
+	else:
+		_queue_direct(_occ_aabb) # the whole direct cache is stale (the geometry moved)
+		_lights_dirty = true
+		_static_boost = maxi(_static_boost, 8)
+		_on_lighting_changed(true)
 	_mark_motion()
 	_update_occ_globals()
-	print("GIManager: occupancy rebuilt in place in %.1f ms" % ((Time.get_ticks_usec() - t0) / 1000.0))
+	print("GIManager: occupancy rebuilt %s in %.1f ms" % ["around " + str(region) if local else "in place (whole map)",
+			(Time.get_ticks_usec() - t0) / 1000.0])
 	return true
 
 
@@ -2120,7 +2302,7 @@ func _chunk_dist(i: int, p: Vector3) -> float:
 
 
 func _chunk_in_range(i: int, p: Vector3) -> bool:
-	if _load_all_request:
+	if _load_all_request or _unlimited:
 		return true
 	match _chunk_mode:
 		ChunkMode.LOAD_ALL:
@@ -2451,6 +2633,8 @@ func get_stats() -> Dictionary:
 		"chunk_mode": int(_chunk_mode), "load_all": bool(prog["load_all"]),
 		"near_updates": _near.updates, "cache_updates": _cache.updates, "occ": _occ_size,
 		"direct_building": _dir_initial,
+		"direct_bricks": _dir_bricks.x * _dir_bricks.y * _dir_bricks.z, "direct_bricks_dirty": _dir_ndirty,
+		"near_mode": 1 if _near_fixed else 0, "unlimited": _unlimited,
 	}
 
 

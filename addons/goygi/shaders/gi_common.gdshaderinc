@@ -83,11 +83,22 @@ float gi_leak_guard(vec3 wpos, vec3 geo_n, vec3 sp, int taps) {
 	return 1.0 - smoothstep(0.35, 0.85, o) * (taps > 1 ? 0.985 : 0.75);
 }
 
-// Voxels above the roof slab of a column hold outdoor sky light. Surfaces below
-// it must not pick them up (that caused bright strips along the top of walls
-// and glowing ceilings). Continuous in the height of the sample point, so it
-// fades instead of switching between two voxel layers at once.
-float gi_roof_guard(vec3 wpos, vec3 sp) {
+// Voxels above the roof slab of a column hold outdoor sky light. A surface below
+// it must not read them (that is what made ceilings glow and put a bright strip
+// along the top of every wall).
+//
+// This used to SCALE the result down by up to 100% over a 0.8 m band
+// (smoothstep(roof - 0.5, roof + 0.3, sp.y)), which darkened every surface that
+// came near a ceiling - and its "the surface is at roof - 0.2, so it is
+// outdoors" exemption let a ceiling that sits just under the slab read the
+// sky-lit voxels above it.
+//
+// It now only moves the SAMPLE POINT down to just below the slab, which is
+// continuous (a min of a continuous quantity), so nothing is darkened: a ceiling
+// reads the voxel row of the room, and the wall right under it keeps its light.
+// The surface is left alone when it really is outdoors (at or above its own
+// slab), or when the sample is already fully inside the room.
+float gi_roof_guard(vec3 wpos, inout vec3 sp, float cell) {
 	if (gi_roof_info.z <= 0.0) {
 		return 1.0;
 	}
@@ -96,10 +107,12 @@ float gi_roof_guard(vec3 wpos, vec3 sp) {
 		return 1.0;
 	}
 	float roof = textureLod(gi_roof, ruv, 0.0).r; // top of the highest solid 0.25 m cell
-	if (wpos.y >= roof - 0.2) {
-		return 1.0; // the surface itself is at or above the roof: outdoors
+	float top = roof - max(0.5 * cell, gi_occ_inv.w); // highest sample still indoors
+	if (sp.y <= top || wpos.y >= roof - gi_occ_inv.w) {
+		return 1.0;
 	}
-	return 1.0 - smoothstep(roof - 0.5, roof + 0.3, sp.y);
+	sp.y = top;
+	return 1.0;
 }
 
 // irr: irradiance / PI for the shading normal, rad: approx. radiance from the reflection dir
@@ -115,7 +128,7 @@ void gi_sample(vec3 wpos, vec3 geo_n, vec3 nrm, vec3 refl, out vec3 irr, out vec
 		vec3 sp = wpos + geo_n * cell * gi_filter.y;
 		float w = gi_fade(sp, gi_near_min.xyz, gi_near_max.xyz, cell * 2.0);
 		if (w > 0.0) {
-			w *= gi_leak_guard(wpos, geo_n, sp, mode) * gi_roof_guard(wpos, sp);
+			w *= gi_leak_guard(wpos, geo_n, sp, mode) * gi_roof_guard(wpos, sp, cell);
 			// toroidal volume: texel index = world cell mod size, so the
 			// normalised coordinate really is world position / volume extent
 			vec3 uvw = sp * gi_near_inv.xyz;
@@ -134,7 +147,7 @@ void gi_sample(vec3 wpos, vec3 geo_n, vec3 nrm, vec3 refl, out vec3 irr, out vec
 		// the same guard keeps sky-lit outside light from bleeding into rooms
 		float w = gi_fade(sp, gi_far_min.xyz, gi_far_max.xyz, cell * 0.5) * gi_chunk_fade(sp) * (1.0 - cov);
 		if (w > 0.0) {
-			w *= gi_leak_guard(wpos, geo_n, sp, mode) * gi_roof_guard(wpos, sp);
+			w *= gi_leak_guard(wpos, geo_n, sp, mode) * gi_roof_guard(wpos, sp, cell);
 			vec3 uvw = (sp - gi_far_min.xyz) * gi_far_inv.xyz;
 			vec4 r = texture(gi_far_r, uvw);
 			vec4 g = texture(gi_far_g, uvw);
@@ -217,7 +230,7 @@ vec3 gi_debug_color(vec3 wpos, vec3 geo_n, vec3 nrm, vec3 irr) {
 		// light is cut, so walls that lose their indirect light are easy to spot.
 		float cell = gi_near_min.w > 0.5 ? gi_near_inv.w : gi_far_inv.w;
 		vec3 sp = wpos + geo_n * cell * gi_filter.y;
-		float g = gi_leak_guard(wpos, geo_n, sp, max(int(gi_filter.x + 0.5), 1)) * gi_roof_guard(wpos, sp);
+		float g = gi_leak_guard(wpos, geo_n, sp, max(int(gi_filter.x + 0.5), 1)) * gi_roof_guard(wpos, sp, cell);
 		return vec3(1.0 - g, g * 0.9, 0.1);
 	}
 	return irr * gi_params.x;

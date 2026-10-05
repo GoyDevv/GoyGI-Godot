@@ -11,6 +11,61 @@ prints the same stats it checks (`blockiness` = wall smoothness, lower is
 smoother; the GI-off/on luminance ratio; the number of chunks loaded). See
 [Tests and CI](README.md#tests-and-ci).
 
+## [3.2.0] - 2026-10-05
+
+Makes the GI react fast instead of converging slowly, stops an edit from
+invalidating the whole map, and makes added lights work without a restart.
+
+### Fixed
+
+- **A light added while the game (or the editor) is running did nothing until
+  the scene was reopened.** Emitters and surface materials were only attached
+  once, at `start()`. GoyGI now rescans on `node_added` and at 2 s intervals, so
+  a lamp spawned at run time - or dropped into the editor - lights the scene on
+  the next frame, with no restart.
+- **Moving one prop in the editor hitchhiked and could stall.** Every edit dirtied
+  the *whole* direct light cache, marked *every* chunk stale and forced 8
+  full-volume updates in a row. A rebuild now asks the colliders what actually
+  moved (transform + shape signature), refreshes only that part of the direct
+  cache, only the chunks near it, and only that region of the volume.
+- **An edit took up to a second to appear.** The editor geometry poll ran at
+  1 Hz; it now runs 4 times a second and only pays for the colliders that
+  changed.
+- **Rooms were treated as outdoors in their top 0.6 m.** The "is this point
+  under a roof?" test used a flat 0.6 m tolerance, so the top of every room
+  counted as open sky: sky rays that ran out of length up there were granted
+  full sky radiance (a glowing ceiling, washed-out light in the upper part of a
+  room). The tolerance is now one occupancy cell, derived from the geometry.
+- **The roof guard darkened surfaces instead of protecting them.** It scaled the
+  indirect light down by up to 100 % over a 0.8 m band, which put a dark gradient
+  on the top of every wall and under every ceiling, while its exemption let a
+  ceiling read the sky-lit voxels above the slab. It now moves the *sample point*
+  below the slab (continuous, darkens nothing) and never touches the surface.
+- **The display pass was a second, frame-rate-dependent blur.** Its neighbour
+  blur runs every rendered frame, so it scaled with the frame rate, and at the
+  default strength it softened fine detail (doorways, props) and made a change
+  look like it was "slowly resolving". Denoising is the volume pass's job; the
+  display pass now stays light.
+
+### Added
+
+- **Burn-in blending.** A voxel that just changed (entered the volume, a lamp
+  switched near it, the geometry under it moved) now blends at ~0.6 for its first
+  few updates instead of the steady-state 0.09, and its *first* estimate is
+  denoised against the neighbours that already had history. A fresh volume is
+  clean in ~3 updates instead of ~30 - without making the settled volume noisier,
+  because the steady-state blend is unchanged.
+- **`near_mode` (`Camera` / `Fixed`).** `Fixed` pins the fine volume to the map:
+  nothing enters or leaves it, nothing fades, and the GI has no render distance
+  at all. Highest quality on a small level.
+- **`unlimited_distance`.** Keeps every chunk of the world cache computed and up
+  to date wherever the camera is, independent of `chunk_mode`.
+- Four new CI checks, so these cannot come back: **ceiling** (a straight-up shot,
+  no blocks and not blown out), **convergence** (a x3 lamp change must be >60 %
+  on screen after 5 frames), **move cost** (moving a prop must dirty <25 % of the
+  direct-cache bricks), **late lamp** (a lamp added at run time gets an emitter
+  and visibly changes the frame).
+
 ## [3.1.0] - 2026-10-05
 
 Fixes the three things that made GoyGI look like a voxel renderer with holes in

@@ -458,6 +458,7 @@ Every option is an exported property on `GIManager` (and mirrored as `goygi/opti
 | **Temporal** | `update_rate`, `response`, `smoothing`, `stabilization`, `spatial_filter`, `adaptive_response`, `transition`, `auto_budget`, `target_fps` |
 | **Filtering** | `filtering` = `Fast` (no guard) / `Smooth` (1 tap) / `Leak-Proof` (2 taps) |
 | **World Cache** | `chunk_mode` = `Off` / `Near Only` / `Balanced` / `Full`, `chunk_distance` |
+| **Distance** | `near_mode` = `Camera` (the fine volume follows you) / `Fixed` (pinned to the map: no render distance at all), `unlimited_distance` (keep every chunk up to date, wherever the camera is) |
 | **Surfaces** | `normal_maps`, `fast_triplanar` (one projection instead of three) |
 
 The four presets set: resolution + tier, VPL count, ray budget, update budget, filtering mode, and — for the two phone tiers — `fast_triplanar = true` and `normal_maps = false`, because on mobile the *level* shader is usually the expensive part, not the GI.
@@ -476,7 +477,8 @@ The four presets set: resolution + tier, VPL count, ray budget, update budget, f
 * `fast_triplanar = true` + `normal_maps = false` is the biggest single win if the frame time is fragment-bound.
 * `update_rate = 10..20` on weak GPUs: the display pass hides it completely, and the fast (dynamic light) path still reacts every update.
 * `auto_budget` throttles the update rate when the frame time exceeds `target_fps`, and releases again when there is headroom.
-* `chunk_mode = Near Only` with `chunk_distance = 24` is the cheapest setting that still covers what you see.
+* `chunk_mode = Near Only` with `chunk_distance = 24` is the cheapest setting that still covers what you see. `unlimited_distance = true` is the opposite end: every chunk stays computed and current, at the cost of update budget.
+* `near_mode = Fixed` is the highest quality option on a small level: the fine volume is pinned to the map, so nothing enters or leaves it and the GI has no render distance - at the cost of resolution where you are (use it with a small `voxel_size` rather than a large volume).
 * `detail_occlusion = false` removes 5 occupancy taps per pixel on surfaces.
 * If a scene has no collision, GoyGI builds trimesh helper colliders on layer 20 — on big levels that pass is the most expensive part of startup, so give your static geometry real collision when you can.
 
@@ -497,6 +499,8 @@ Since 3.1 every path that disables the GI says so in the log with an `ERROR: GIM
 
 **The GI is too slow.** See [Performance on phones](#performance-on-phones); `update_rate`, `filtering = Fast`, `fast_triplanar` and `chunk_mode = Near Only` are the four knobs that matter.
 
+**A light I added (in the editor, or spawned at run time) does not light anything.** Fixed in 3.2: GoyGI rescans for new lights, meshes and colliders on `node_added` and every two seconds. If you are on an older version, call `GIManager.rescan()` yourself after adding lights.
+
 ## Known limitations
 
 * `Compatibility` renderer: no `RenderingDevice` → the GI is disabled (direct light only).
@@ -508,8 +512,10 @@ Since 3.1 every path that disables the GI says so in the log with an `ERROR: GIM
 
 `test/gi_test_scene.tscn` builds a two-room level with a doorway, a red/green colour-bleeding wall, a lamp and a **sealed box with a bright lamp inside**, runs GoyGI on the `Mobile` rendering method and writes
 
-* `artifacts/*.png` — every debug view plus a wall close-up, a shot through the doorway and a GI-off comparison,
+* `artifacts/*.png` — every debug view plus a wall close-up, a straight-up ceiling shot, a shot through the doorway and a GI-off comparison,
 * `artifacts/summary.txt` — the stats and the checks.
+
+The checks in full: GPU up, volume updating, chunks loaded, **wall smooth** (second-derivative metric), **ceiling smooth and not blown out** (a straight-up crop), **GI off keeps the scene lit**, GI reaching the second room, **a light change landing within 5 frames**, **moving one prop dirtying < 25 % of the direct-cache bricks**, and **a lamp added at run time getting an emitter and lighting the scene**.
 
 `.github/workflows/ci.yml` runs exactly that on **Godot 4.7.2** with **Mesa's software Vulkan (lavapipe)** under Xvfb — a real Vulkan device in a container, no GPU needed — and fails the job when a script or shader error appears, when one of the four compute shaders did not actually compile, when the GI never starts, when the chunks never load, when the wall shows voxel blocks (a second-derivative metric on a wall crop), or when switching the GI off makes the scene darker than it should (the ambient fallback regression). The screenshots are uploaded as artifacts for every push and pull request, and the job summary carries the numbers the checks used.
 

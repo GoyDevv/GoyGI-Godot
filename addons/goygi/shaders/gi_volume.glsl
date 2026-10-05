@@ -278,9 +278,16 @@ bool under_roof(vec3 p) {
 		return false;
 	}
 	ivec2 rs = textureSize(roof_tex, 0);
-	return p.y < texelFetch(roof_tex, clamp(ivec2(uvw.xz * vec2(rs)), ivec2(0), rs - 1), 0).r - prm.dir_extent.w;
+	return p.y < texelFetch(roof_tex, clamp(ivec2(uvw.xz * vec2(rs)), ivec2(0), rs - 1), 0).r - pc.cell.y;
 }
 
+// Is p inside the building? The roof of a column is the TOP of its highest solid
+// cell, so "indoor" starts one occupancy cell below it - that is the underside of
+// the ceiling slab. The tolerance used to be a flat 0.6 m, which classified the
+// top 0.6 m of every room as outdoors: the sky rays started up there ran out of
+// length and were granted full sky radiance, so rooms were filled with outdoor
+// light from above (a glowing ceiling and washed-out light in the top of the
+// room). It is a geometric quantity, so it is derived from the occupancy cell.
 // highest solid point of the column at p (-1e4 = no geometry)
 float roof_at(vec3 p) {
 	vec3 uvw = dir_uvw(p);
@@ -657,6 +664,37 @@ int process(int work, ivec3 t, ivec3 c, bool was_valid, float age) {
 		a_s = max(a_s, prm.sreg_info.y); // a lamp changed here: drop the old light fast
 	}
 	float a_f = pc.occ_origin.w; // fast part blend
+	// ---- 6-neighbour average of the previous result, never across a wall.
+	// It is used twice: to denoise the history of a voxel that has one, and -
+	// when the voxel has none yet - to denoise its FIRST estimate. A voxel with
+	// no history used to be stored 100% raw, so one 6-ray estimate showed up as
+	// a bright or dark block until the temporal blend averaged it away: that is
+	// what "I can see the voxels, and they fix themselves slowly" looked like.
+	float dw = prm.tune2.x;
+	bool denoise = !cmode && dw > 0.0 && (flags & F_DENOISE) != 0;
+	vec4 nr = vec4(0.0), ng = vec4(0.0), nb = vec4(0.0);
+	vec4 nvr = vec4(0.0), nvg = vec4(0.0), nvb = vec4(0.0);
+	float nw = 0.0;
+	if (denoise) {
+		for (int k = 0; k < 6; k++) {
+			ivec3 cn = c + OFS[k];
+			ivec3 tn;
+			if (!prev_texel(cn, tn)) {
+				continue;
+			}
+			vec3 xn = (vec3(cn) + 0.5) * vox;
+			if (occ_at(xn, 0) > 0.5 || occ_at(mix(x, xn, 0.5), 0) > 0.5) {
+				continue;
+			}
+			nr += texelFetch(prev_r, tn, 0) * dw;
+			ng += texelFetch(prev_g, tn, 0) * dw;
+			nb += texelFetch(prev_b, tn, 0) * dw;
+			nvr += texelFetch(prev_vr, tn, 0) * dw;
+			nvg += texelFetch(prev_vg, tn, 0) * dw;
+			nvb += texelFetch(prev_vb, tn, 0) * dw;
+			nw += dw;
+		}
+	}
 	vec4 tr, tg, tb, vr, vg, vb;
 	bool have_prev = was_valid;
 	if (was_valid) {
@@ -666,34 +704,13 @@ int process(int work, ivec3 t, ivec3 c, bool was_valid, float age) {
 		vr = cmode ? vec4(0.0) : texelFetch(prev_vr, t, 0);
 		vg = cmode ? vec4(0.0) : texelFetch(prev_vg, t, 0);
 		vb = cmode ? vec4(0.0) : texelFetch(prev_vb, t, 0);
-		float dw = prm.tune2.x;
-		if ((flags & F_DENOISE) != 0 && dw > 0.0) {
-			// Edge-aware blur of the history with the 6 neighbours.
-			// Neighbours behind a wall (solid in between) are skipped -> no leaks.
-			vec4 a_tr = tr, a_tg = tg, a_tb = tb, a_vr = vr, a_vg = vg, a_vb = vb;
-			float sw = 1.0;
-			for (int k = 0; k < 6; k++) {
-				ivec3 cn = c + OFS[k];
-				ivec3 tn;
-				if (!prev_texel(cn, tn)) {
-					continue;
-				}
-				vec3 xn = (vec3(cn) + 0.5) * vox;
-				if (occ_at(xn, 0) > 0.5 || occ_at(mix(x, xn, 0.5), 0) > 0.5) {
-					continue;
-				}
-				a_tr += texelFetch(prev_r, tn, 0) * dw;
-				a_tg += texelFetch(prev_g, tn, 0) * dw;
-				a_tb += texelFetch(prev_b, tn, 0) * dw;
-				if (!cmode) {
-					a_vr += texelFetch(prev_vr, tn, 0) * dw;
-					a_vg += texelFetch(prev_vg, tn, 0) * dw;
-					a_vb += texelFetch(prev_vb, tn, 0) * dw;
-				}
-				sw += dw;
+		if (nw > 0.0) {
+			// edge-aware blur of the history: self weight 1, each neighbour dw
+			float inv = 1.0 / (1.0 + nw);
+			tr = (tr + nr) * inv; tg = (tg + ng) * inv; tb = (tb + nb) * inv;
+			if (!cmode) {
+				vr = (vr + nvr) * inv; vg = (vg + nvg) * inv; vb = (vb + nvb) * inv;
 			}
-			tr = a_tr / sw; tg = a_tg / sw; tb = a_tb / sw;
-			vr = a_vr / sw; vg = a_vg / sw; vb = a_vb / sw;
 		}
 	} else if (!cmode) {
 		// newly covered voxel: start from the cached static lighting instead of black
@@ -709,6 +726,16 @@ int process(int work, ivec3 t, ivec3 c, bool was_valid, float age) {
 				a_f = 1.0;
 			}
 		}
+	}
+	// no history of its own: denoise the first estimate against the neighbours
+	// that did have one. prev_texel() only accepts neighbours inside the previous
+	// volume, so this stays world-space correct even while the volume moves.
+	if (!was_valid && nw > 0.0) {
+		float inv = 1.0 / nw;
+		float we = clamp(dw * 0.9, 0.0, 0.75);
+		sr_n = mix(sr_n, (nr - nvr) * inv, we);
+		sg_n = mix(sg_n, (ng - nvg) * inv, we);
+		sb_n = mix(sb_n, (nb - nvb) * inv, we);
 	}
 
 	bool changed = !was_valid;
@@ -728,6 +755,15 @@ int process(int work, ivec3 t, ivec3 c, bool was_valid, float age) {
 			a_s = mix(a_s, prm.tune.w, k);
 			changed = changed || k > 0.3;
 		}
+		// ---- burn-in: right after a voxel changed (it just entered the volume,
+		// a lamp switched near it, the geometry under it moved) blend much faster
+		// than the steady-state factor. Convergence used to need 1 / a_s = 10+
+		// full updates per voxel; the first few now land at 0.6, so a fresh volume
+		// is clean in ~3 updates instead of ~30. The steady factor stays slow,
+		// which is what keeps a settled volume free of noise and blotches.
+		float burn = 1.0 - clamp((float(frame) - age) / 6.0, 0.0, 1.0);
+		a_s = mix(a_s, max(a_s, 0.6), burn);
+		a_f = mix(a_f, max(a_f, 0.75), burn);
 		vec4 sr_p = tr - vr, sg_p = tg - vg, sb_p = tb - vb; // previous slow part
 		vr_n = mix(vr, vr_n, a_f);
 		vg_n = mix(vg, vg_n, a_f);

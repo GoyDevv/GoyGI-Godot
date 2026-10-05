@@ -64,6 +64,8 @@ const DEFAULTS := {
 	"gi_environment": 1.0,
 	"gi_chunk_mode": 1,
 	"gi_chunk_distance": 24.0,
+	"gi_near_mode": 0,
+	"gi_unlimited_distance": false,
 	"gi_auto_budget": true,
 	"gi_debug_view": 0,
 	"gi_show_vpls": false,
@@ -96,6 +98,8 @@ const HINTS := {
 	"gi_environment": [PROPERTY_HINT_RANGE, "0,2,0.05"],
 	"gi_chunk_mode": [PROPERTY_HINT_ENUM, "Off,Near Only,Balanced,Full"],
 	"gi_chunk_distance": [PROPERTY_HINT_RANGE, "8,64,1"],
+	"gi_near_mode": [PROPERTY_HINT_ENUM, "Camera,Fixed"],
+	"gi_unlimited_distance": [PROPERTY_HINT_NONE, ""],
 	"gi_debug_view": [PROPERTY_HINT_ENUM, "Off,GI Only,Voxels,GI Age,Chunks,Leak Guard"],
 	"max_fps": [PROPERTY_HINT_RANGE, "0,240,1"],
 }

@@ -32,6 +32,7 @@ var cam: Camera3D
 var level: Node3D
 var sun: DirectionalLight3D
 var env: WorldEnvironment
+var lamp: OmniLight3D
 
 var _log: PackedStringArray = []
 var _checks: Array = [] # [name, ok, detail]
@@ -119,6 +120,12 @@ func _run() -> void:
 			"off=%.4f on=%.4f" % [off_lum, on_lum])
 	_check("GI reaches the second room", _mean_luminance(far) > 0.0, "lum=%.4f" % _mean_luminance(far))
 
+	# =============================================================== regressions
+	await _check_ceiling()
+	await _check_convergence()
+	await _check_move_cost()
+	await _check_late_lamp()
+
 	_note("CPU %.2f ms/update, %d VPLs (%d dynamic), %d static lights" % [float(s["cpu_ms"]), int(s["vpls"]), int(s["vpls_dynamic"]), int(s["lights_static"])])
 	_note("occupancy %s @ %.2f m, near %s @ %.2f m, cache %s @ %.2f m" % [str(s["occ"]), 0.25, str(s["size"]), float(s["cell"]), str(s["cache_size"]), float(s["cache_cell"])])
 	_write_log()
@@ -191,7 +198,7 @@ func _build_level() -> void:
 	add_child(trap)
 
 	# ---- the room lamp (the main indirect light source indoors)
-	var lamp := OmniLight3D.new()
+	lamp = OmniLight3D.new()
 	lamp.position = Vector3(0.0, 2.5, -1.0)
 	lamp.light_energy = 3.0
 	lamp.omni_range = 12.0
@@ -209,7 +216,7 @@ func _build_level() -> void:
 
 ## A static box: collision shape (what the GI voxelizes) + mesh + StandardMaterial
 ## (converted to the GoyGI Standard shader by auto_setup).
-func _box(pos: Vector3, size: Vector3, color: Color) -> void:
+func _box(pos: Vector3, size: Vector3, color: Color) -> StaticBody3D:
 	var body := StaticBody3D.new()
 	body.position = pos
 	var cs := CollisionShape3D.new()
@@ -228,6 +235,93 @@ func _box(pos: Vector3, size: Vector3, color: Color) -> void:
 	mi.material_override = mat
 	body.add_child(mi)
 	level.add_child(body)
+	return body
+
+
+# ================================================================== regressions
+
+## The ceiling, straight up. "It is always the ceiling that is messed up": the
+## ceiling is the worst case for the volume (it is the surface closest to the sky
+## light stored above the roof slab, and the top of the volume), so it gets its
+## own camera and its own two checks: no blocks, and lit without being blown out.
+func _check_ceiling() -> void:
+	cam.position = Vector3(0.0, 0.4, 1.6)
+	cam.look_at(Vector3(0.0, 3.05, 3.2), Vector3.UP)
+	var img := await _shot("10_ceiling_look_up", 0)
+	var blk := _blockiness(img, Rect2i(320, 180, 640, 400))
+	var lum := _mean_luminance(img)
+	_note("ceiling crop: blockiness %.5f, mean luminance %.4f" % [blk, lum])
+	_check("ceiling is smooth (no voxel blocks)", blk < 0.06, "blockiness=%.5f (limit 0.06)" % blk)
+	_check("ceiling is lit, not blown out", lum > 0.015 and lum < 0.92, "lum=%.4f (want 0.015..0.92)" % lum)
+
+
+## How fast a real light change lands: after 5 frames most of it must be visible.
+## The old temporal maths needed 1/a_s = 10+ full updates per voxel before a
+## change was there, which is what "I can see the voxels and they fix themselves
+## slowly" looked like. The burn-in path blends the first few updates at 0.6.
+func _check_convergence() -> void:
+	var before := _grab()
+	lamp.light_energy *= 3.0
+	await _settle(5)
+	var early := _grab()
+	await _settle(45)
+	var settled := _grab()
+	lamp.light_energy /= 3.0
+	await _settle(10)
+	var total := _mean_abs_diff(before, settled)
+	var left := _mean_abs_diff(early, settled)
+	var landed := 1.0 - left / maxf(total, 1e-5)
+	_note("lamp x3: %.1f %% of the change is on screen after 5 frames (total diff %.4f)" % [landed * 100.0, total])
+	_check("a light change lands within 5 frames", total > 0.002 and landed > 0.6, "%.0f %% after 5 frames (want > 60 %%)" % (landed * 100.0))
+
+
+## Moving one prop must not invalidate the whole map. A rebuild asks the
+## colliders what moved and refreshes that part of the direct cache, those
+## chunks and that part of the volume only, so the cost is proportional to the
+## prop, not to the level.
+func _check_move_cost() -> void:
+	var prop := _box(Vector3(2.0, 0.5, 2.0), Vector3(1.0, 1.0, 1.0), Color(0.3, 0.4, 0.62))
+	await _settle(6)
+	prop.position = Vector3(2.7, 0.5, 2.7)
+	await get_tree().process_frame
+	var t0 := Time.get_ticks_usec()
+	gi.rebuild()
+	var ms := (Time.get_ticks_usec() - t0) / 1000.0
+	var st := gi.get_stats()
+	var dirty := int(st["direct_bricks_dirty"])
+	var bricks := maxi(int(st["direct_bricks"]), 1)
+	_note("prop moved + rebuild: %.1f ms, %d/%d direct-cache bricks dirty (%.1f %%), direct work %d units" %
+			[ms, dirty, bricks, 100.0 * dirty / bricks, int(st["direct_pending"])])
+	_check("moving a prop rebuilds only its part of the map", dirty < maxi(bricks / 4, 1),
+			"%d/%d bricks dirty (want < 25 %%)" % [dirty, bricks])
+	await _settle(10)
+
+
+## A lamp that appears after the GI started has to work without a restart - this
+## is the editor case (add a spot light, see nothing change) and the run-time case
+## (spawn a torch).
+func _check_late_lamp() -> void:
+	cam.position = Vector3(0.2, 1.6, 2.2)
+	cam.look_at(Vector3(0.2, 1.5, -6.0), Vector3.UP)
+	await _settle(12)
+	var pre := _grab()
+	var late := OmniLight3D.new()
+	late.position = Vector3(-2.0, 2.4, 0.5)
+	late.light_energy = 5.0
+	late.omni_range = 10.0
+	late.light_color = Color(0.35, 0.65, 1.0) # unmistakably blue
+	level.add_child(late)
+	await _settle(8)
+	var has_emitter := false
+	for c in late.get_children(true):
+		if c is GIEmitter:
+			has_emitter = true
+	await _settle(30)
+	var post := _grab()
+	var diff := _mean_abs_diff(pre, post)
+	_note("lamp added at run time: emitter attached %s, frame changed by %.4f" % [str(has_emitter), diff])
+	_check("a lamp added at run time gets an emitter", has_emitter, "GIEmitter child: %s" % str(has_emitter))
+	_check("a lamp added at run time lights the scene", diff > 0.004, "mean |change| = %.4f" % diff)
 
 
 func _build_gi() -> void:
@@ -259,12 +353,29 @@ func _build_gi() -> void:
 func _shot(name: String, debug_view: int) -> Image:
 	gi.debug_view = debug_view
 	await _settle(SETTLE)
-	var img := get_viewport().get_texture().get_image()
-	img.convert(Image.FORMAT_RGBA8)
+	var img := _grab()
 	_ensure_dir()
 	var err := img.save_png(OUT_DIR + "/" + name + ".png")
 	_note("shot %s (%dx%d)%s" % [name, img.get_width(), img.get_height(), "" if err == OK else " - SAVE FAILED"])
 	return img
+
+
+## The current frame as an image (no file written).
+func _grab() -> Image:
+	var img := get_viewport().get_texture().get_image()
+	img.convert(Image.FORMAT_RGBA8)
+	return img
+
+
+## Mean absolute luminance difference between two frames: how visible a change is.
+func _mean_abs_diff(a: Image, b: Image) -> float:
+	var sum := 0.0
+	var n := 0
+	for y in range(0, a.get_height(), 6):
+		for x in range(0, a.get_width(), 6):
+			sum += absf(_lum(a.get_pixel(x, y)) - _lum(b.get_pixel(x, y)))
+			n += 1
+	return sum / maxf(float(n), 1.0)
 
 
 ## Waits `frames` rendered frames, but never longer than SETTLE_MAX_MS: CI runs on
